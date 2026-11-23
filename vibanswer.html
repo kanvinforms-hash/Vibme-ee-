@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="ta">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>VibAnswer</title>
+<style>
+:root{--bg:#0f1115;--card:#1a1d24;--fg:#f2f4f8;--mute:#9aa3b2;--acc:#ffd23f;--ok:#4cd68a;--bad:#ff6b6b;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,-apple-system,"Noto Sans Tamil",sans-serif;padding:max(12px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(16px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))}
+h1{font-size:1.4rem;margin:.2rem 0 .1rem}
+.sub{color:var(--mute);margin:0 0 .8rem;font-size:.9rem}
+.card{background:var(--card);border-radius:14px;padding:12px;margin:0 0 12px}
+label{display:block;font-size:.8rem;color:var(--mute);margin:.5rem 0 .2rem}
+input,select{width:100%;padding:12px;border-radius:10px;border:1px solid #333a47;background:#0f1115;color:var(--fg);font-size:1rem}
+button{font:inherit;border:0;border-radius:12px;padding:14px;background:#2a3040;color:var(--fg);cursor:pointer}
+button.main{background:var(--acc);color:#111;font-weight:700;width:100%;font-size:1.1rem}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
+video{width:100%;max-height:42vh;background:#000;border-radius:12px;object-fit:contain;display:block}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+.row>*{flex:1;min-width:0}
+#big{font-size:6rem;font-weight:800;text-align:center;line-height:1.1;color:var(--acc);min-height:7rem;display:flex;align-items:center;justify-content:center}
+#status{text-align:center;color:var(--mute);min-height:1.6em}
+#status.err{color:var(--bad)}
+#status.ok{color:var(--ok)}
+details summary{cursor:pointer;color:var(--mute)}
+.chk{display:flex;align-items:center;gap:10px;margin-top:.6rem}
+.chk input{width:auto}
+</style>
+</head>
+<body>
+<h1>VibAnswer</h1>
+<p class="sub">பார்க்காம, கேட்காம, உணர்ந்து பதில் தெரிஞ்சுக்கலாம்</p>
+
+<div class="card">
+  <details id="setup" open>
+    <summary>Setup (ஒரு தடவை மட்டும்)</summary>
+    <label for="key">Gemini API Key</label>
+    <input id="key" type="password" autocomplete="off" placeholder="AIza...">
+    <label for="model">Model</label>
+    <input id="model" value="gemini-2.5-flash">
+    <label for="cam">Camera (USB Camera குத்தினா இங்க தெரியும்)</label>
+    <select id="cam"><option value="">Default (பின் Camera)</option></select>
+    <label for="vib">Vibration அளவு</label>
+    <select id="vib">
+      <option value="soft">மெல்லிய (Library-க்கு, சத்தம் கம்மி)</option>
+      <option value="normal">சாதாரண (அதிகம்)</option>
+    </select>
+    <div class="chk"><input type="checkbox" id="auto" checked><label for="auto" style="margin:0;color:var(--fg)">Auto: Camera 2.5 வினாடி அசையாம இருந்தா தானா Photo எடுக்கும்</label></div>
+  </details>
+</div>
+
+<div class="card">
+  <video id="v" playsinline muted></video>
+  <canvas id="c" hidden></canvas>
+  <canvas id="m" width="48" height="36" hidden></canvas>
+</div>
+
+<div id="big" aria-live="assertive">–</div>
+<div id="status" role="status">Start அழுத்துங்க</div>
+
+<div class="card">
+  <button class="main" id="start">Start Camera</button>
+  <div class="row" style="margin-top:8px">
+    <button id="now" disabled>இப்பவே Answer</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="sub" style="margin:0 0 6px">Vibration பழகுங்க (Practice)</div>
+  <div class="row">
+    <button data-t="A">A · 1</button><button data-t="B">B · 2</button>
+    <button data-t="C">C · 3</button><button data-t="D">D · 4</button>
+  </div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const LS={get(k){try{return localStorage.getItem(k)}catch(e){return null}},set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
+const PROMPT="This image shows a multiple-choice exam question (English or Tamil). Options may be labelled A,B,C,D or a,b,c,d or 1,2,3,4 or Tamil letters; treat them in order as A,B,C,D. Work out the single correct option. Reply with ONLY one letter: A, B, C or D. If you cannot read the question, reply X.";
+let stream=null,busy=false,armed=true,stillSince=0,prev=null,timer=null,wake=null;
+
+$('key').value=LS.get('va_key')||'';
+$('model').value=LS.get('va_model')||'gemini-2.5-flash';
+$('auto').checked=LS.get('va_auto')!=='0';
+$('auto').onchange=()=>LS.set('va_auto',$('auto').checked?'1':'0');
+
+function setStatus(t,cls){const s=$('status');s.textContent=t;s.className=cls||''}
+
+/* ---------- vibration ---------- */
+const VIB={soft:{pulse:70,gap:380,endGap:650,end:200,err:40},normal:{pulse:300,gap:500,endGap:800,end:1000,err:100}};
+$('vib').value=LS.get('va_vib')||'soft';
+$('vib').onchange=()=>LS.set('va_vib',$('vib').value);
+function patternFor(L){
+  const c=VIB[$('vib').value]||VIB.soft;
+  const n={A:1,B:2,C:3,D:4}[L];
+  if(!n)return [c.err,c.err+40,c.err,c.err+40,c.err];  // படிக்க முடியல: 3 வேகமான short
+  const p=[];
+  for(let i=0;i<n;i++){p.push(c.pulse);p.push(c.gap);}
+  p[p.length-1]=c.endGap;                         // கடைசி pulse-க்கு அப்புறம் பெரிய gap
+  p.push(c.end);                                  // முடிவு buzz
+  return p;
+}
+function beep(p){                                 // Vibration இல்லாத phone-க்கு beep
+  try{
+    const ac=new (window.AudioContext||window.webkitAudioContext)();
+    let t=ac.currentTime+0.05;
+    p.forEach((d,i)=>{
+      if(i%2===0){const o=ac.createOscillator();o.frequency.value=880;o.connect(ac.destination);o.start(t);o.stop(t+d/1000);}
+      t+=d/1000;
+    });
+  }catch(e){}
+}
+function play(L){
+  const p=patternFor(L);
+  const total=p.reduce((a,b)=>a+b,0);
+  let ok=false;
+  if(navigator.vibrate){ok=navigator.vibrate(p);}
+  if(!ok)beep(p);
+  return total;
+}
+document.querySelectorAll('[data-t]').forEach(b=>b.onclick=()=>{$('big').textContent=b.dataset.t;play(b.dataset.t)});
+
+/* ---------- camera ---------- */
+async function listCams(){
+  const cur=$('cam').value;
+  const devs=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==='videoinput');
+  const sel=$('cam');
+  sel.innerHTML='<option value="">Default (பின் Camera)</option>';
+  devs.forEach((d,i)=>{const o=document.createElement('option');o.value=d.deviceId;o.textContent=d.label||('Camera '+(i+1));sel.appendChild(o);});
+  if([...sel.options].some(o=>o.value===cur))sel.value=cur;
+}
+async function startCamera(){
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){setStatus('இந்த Browser-ல Camera இல்ல. Chrome-ல திறங்க.','err');return;}
+  if(stream)stream.getTracks().forEach(t=>t.stop());
+  const id=$('cam').value;
+  const video=id?{deviceId:{exact:id},width:{ideal:1280},height:{ideal:720}}:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}};
+  try{stream=await navigator.mediaDevices.getUserMedia({video,audio:false});}
+  catch(e){setStatus('Camera திறக்கல ('+e.name+'). Permission Allow பண்ணுங்க.','err');return;}
+  const v=$('v');v.srcObject=stream;await v.play();
+  await listCams();
+  const cur=stream.getVideoTracks()[0].getSettings().deviceId;
+  if(cur&&[...$('cam').options].some(o=>o.value===cur))$('cam').value=cur;
+  $('now').disabled=false;$('start').textContent='Camera மாத்து / Restart';
+  try{if(navigator.wakeLock)wake=await navigator.wakeLock.request('screen');}catch(e){}
+  prev=null;armed=true;stillSince=0;
+  if(!timer)timer=setInterval(tick,200);
+  setStatus('Camera ரெடி. Question-ஐ காட்டுங்க.','ok');
+  LS.set('va_key',$('key').value.trim());LS.set('va_model',$('model').value.trim());
+  $('setup').open=false;
+}
+$('start').onclick=startCamera;
+$('cam').onchange=()=>{if(stream)startCamera();};
+if(navigator.mediaDevices)navigator.mediaDevices.addEventListener('devicechange',()=>{listCams().catch(()=>{});});
+
+/* ---------- auto capture (அசையாம இருந்தா) ---------- */
+const mc=$('m'),mx=mc.getContext('2d',{willReadFrequently:true});
+function tick(){
+  const v=$('v');
+  if(!stream||v.videoWidth===0||busy)return;
+  mx.drawImage(v,0,0,48,36);
+  const d=mx.getImageData(0,0,48,36).data;
+  if(prev){
+    let s=0;for(let i=0;i<d.length;i+=4)s+=Math.abs(d[i]-prev[i])+Math.abs(d[i+1]-prev[i+1])+Math.abs(d[i+2]-prev[i+2]);
+    const diff=s/(d.length/4)/3;
+    const now=performance.now();
+    if(diff>6){armed=true;stillSince=0;}
+    else{
+      if(!stillSince)stillSince=now;
+      if(armed&&$('auto').checked){
+        const left=2500-(now-stillSince);
+        if(left<=0){armed=false;capture();}
+        else setStatus('அசையாம வச்சிருங்க… '+Math.ceil(left/1000));
+      }
+    }
+  }
+  prev=new Uint8ClampedArray(d);
+}
+
+/* ---------- Gemini ---------- */
+async function ask(b64){
+  const key=$('key').value.trim();
+  if(!key)throw new Error('API Key போடுங்க (Setup-ல)');
+  const model=($('model').value.trim()||'gemini-2.5-flash');
+  const url='https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent?key='+encodeURIComponent(key);
+  const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+    contents:[{parts:[{text:PROMPT},{inline_data:{mime_type:'image/jpeg',data:b64}}]}],
+    generationConfig:{temperature:0}
+  })});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok)throw new Error((j.error&&j.error.message)||('HTTP '+r.status));
+  const parts=(((j.candidates||[])[0]||{}).content||{}).parts||[];
+  const text=parts.map(p=>p.text||'').join(' ').toUpperCase();
+  const m=text.match(/\b([ABCDX])\b/)||text.match(/([ABCDX])/);
+  return m?m[1]:'X';
+}
+
+async function capture(){
+  if(busy||!stream)return;
+  const v=$('v');if(!v.videoWidth)return;
+  busy=true;
+  try{
+    const c=$('c');const sc=Math.min(1,1280/v.videoWidth);
+    c.width=Math.round(v.videoWidth*sc);c.height=Math.round(v.videoHeight*sc);
+    c.getContext('2d').drawImage(v,0,0,c.width,c.height);
+    const b64=c.toDataURL('image/jpeg',0.85).split(',')[1];
+    setStatus('யோசிக்கிறேன்…');$('big').textContent='…';
+    const L=await ask(b64);
+    $('big').textContent=L==='X'?'?':L;
+    setStatus(L==='X'?'படிக்க முடியல. மறுபடி காட்டுங்க.':'பதில்: '+L,L==='X'?'err':'ok');
+    const ms=play(L);
+    await new Promise(res=>setTimeout(res,ms+300));
+  }catch(e){
+    $('big').textContent='!';
+    setStatus('Error: '+e.message,'err');
+    play('X');
+    await new Promise(res=>setTimeout(res,1200));
+  }
+  busy=false;stillSince=0;
+}
+$('now').onclick=capture;
+</script>
+</body>
+</html>
